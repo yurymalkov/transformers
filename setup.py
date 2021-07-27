@@ -91,7 +91,7 @@ _deps = [
     "cookiecutter==1.7.2",
     "dataclasses",
     "datasets",
-    "deepspeed>=0.4.0",
+    "deepspeed>=0.4.3",
     "docutils==0.16.0",
     "fairscale>0.3",
     "faiss-cpu",
@@ -100,6 +100,7 @@ _deps = [
     "flake8>=3.8.3",
     "flax>=0.3.4",
     "fugashi>=1.0",
+    "GitPython<3.1.19",
     "huggingface-hub==0.0.12",
     "importlib_metadata",
     "ipadic>=1.0.0,<2.0",
@@ -119,10 +120,10 @@ _deps = [
     "parameterized",
     "protobuf",
     "psutil",
-    "pyyaml",
+    "pyyaml>=5.1",
     "pydantic",
     "pytest",
-    "pytest-sugar",
+    "pytest-timeout",
     "pytest-xdist",
     "python>=3.6.0",
     "ray[tune]",
@@ -259,7 +260,7 @@ extras["codecarbon"] = deps_list("codecarbon")
 extras["sentencepiece"] = deps_list("sentencepiece", "protobuf")
 extras["testing"] = (
     deps_list(
-        "pytest", "pytest-xdist", "timeout-decorator", "parameterized", "psutil", "datasets", "pytest-sugar", "black", "sacrebleu", "rouge-score", "nltk"
+        "pytest", "pytest-xdist", "timeout-decorator", "parameterized", "psutil", "datasets", "pytest-timeout", "black", "sacrebleu", "rouge-score", "nltk", "GitPython"
     )
     + extras["retrieval"]
     + extras["modelcreation"]
@@ -336,7 +337,7 @@ install_requires = [
 
 setup(
     name="transformers",
-    version="4.9.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
+    version="4.10.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
     author="Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Sam Shleifer, Patrick von Platen, Sylvain Gugger, Suraj Patil, Stas Bekman, Google AI Language Team Authors, Open AI team Authors, Facebook AI Authors, Carnegie Mellon University Authors",
     author_email="thomas@huggingface.co",
     description="State-of-the-art Natural Language Processing for TensorFlow 2.0 and PyTorch",

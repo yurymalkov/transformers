@@ -119,6 +119,7 @@ from .trainer_utils import (
     default_hp_space,
     denumpify_detensorize,
     get_last_checkpoint,
+    number_of_arguments,
     set_seed,
     speed_metrics,
 )
@@ -821,16 +822,10 @@ class Trainer:
             num_training_steps (int): The number of training steps to do.
         """
         if self.lr_scheduler is None:
-            warmup_steps = (
-                self.args.warmup_steps
-                if self.args.warmup_steps > 0
-                else math.ceil(num_training_steps * self.args.warmup_ratio)
-            )
-
             self.lr_scheduler = get_scheduler(
                 self.args.lr_scheduler_type,
                 self.optimizer,
-                num_warmup_steps=warmup_steps,
+                num_warmup_steps=self.args.get_warmup_steps(num_training_steps),
                 num_training_steps=num_training_steps,
             )
 
@@ -856,9 +851,10 @@ class Trainer:
 
         for key, value in params.items():
             if not hasattr(self.args, key):
-                raise AttributeError(
+                logger.warn(
                     f"Trying to set {key} in the hyperparameter search but there is no corresponding field in `TrainingArguments`."
                 )
+                continue
             old_attr = getattr(self.args, key, None)
             # Casting value to the proper type
             if old_attr is not None:
@@ -905,7 +901,7 @@ class Trainer:
                 torch.save(self.lr_scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
 
     def call_model_init(self, trial=None):
-        model_init_argcount = len(inspect.signature(self.model_init).parameters)
+        model_init_argcount = number_of_arguments(self.model_init)
         if model_init_argcount == 0:
             model = self.model_init()
         elif model_init_argcount == 1:
@@ -989,6 +985,7 @@ class Trainer:
         self,
         resume_from_checkpoint: Optional[Union[str, bool]] = None,
         trial: Union["optuna.Trial", Dict[str, Any]] = None,
+        ignore_keys_for_eval: Optional[List[str]] = None,
         **kwargs,
     ):
         """
@@ -1002,6 +999,9 @@ class Trainer:
                 training will resume from the model/optimizer/scheduler states loaded here.
             trial (:obj:`optuna.Trial` or :obj:`Dict[str, Any]`, `optional`):
                 The trial run or the hyperparameter dictionary for hyperparameter search.
+            ignore_keys_for_eval (:obj:`List[str]`, `optional`)
+                A list of keys in the output of your model (if it is a dictionary) that should be ignored when
+                gathering predictions for evaluation during the training.
             kwargs:
                 Additional keyword arguments used to hide deprecated arguments
         """
@@ -1071,6 +1071,9 @@ class Trainer:
                 # If the model is on the GPU, it still works!
                 self._load_state_dict_in_model(state_dict)
 
+                # release memory
+                del state_dict
+
         # If model was re-initialized, put it on the right device and update self.model_wrapped
         if model_reloaded:
             if self.place_model_on_device:
@@ -1106,12 +1109,20 @@ class Trainer:
         else:
             # see __init__. max_steps is set when the dataset has no __len__
             max_steps = args.max_steps
-            num_train_epochs = int(args.num_train_epochs)
+            # Setting a very large number of epochs so we go as many times as necessary over the iterator.
+            num_train_epochs = sys.maxsize
             num_update_steps_per_epoch = max_steps
             num_train_samples = args.max_steps * total_train_batch_size
 
         if DebugOption.UNDERFLOW_OVERFLOW in self.args.debug:
-            debug_overflow = DebugUnderflowOverflow(self.model)  # noqa
+            if self.args.n_gpu > 1:
+                # nn.DataParallel(model) replicates the model, creating new variables and module
+                # references registered here no longer work on other gpus, breaking the module
+                raise ValueError(
+                    "Currently --debug underflow_overflow is not supported under DP. Please use DDP (torch.distributed.launch)."
+                )
+            else:
+                debug_overflow = DebugUnderflowOverflow(self.model)  # noqa
 
         delay_optimizer_creation = self.sharded_ddp is not None and self.sharded_ddp != ShardedDDPOption.SIMPLE
         if args.deepspeed:
@@ -1322,13 +1333,13 @@ class Trainer:
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(args, self.state, self.control)
 
-                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch)
+                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
 
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
-            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch)
+            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
 
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
                 if is_torch_tpu_available():
@@ -1405,7 +1416,7 @@ class Trainer:
         if len(load_result.unexpected_keys) != 0:
             logger.warn(f"There were unexpected keys in the checkpoint model loaded: {load_result.unexpected_keys}.")
 
-    def _maybe_log_save_evaluate(self, tr_loss, model, trial, epoch):
+    def _maybe_log_save_evaluate(self, tr_loss, model, trial, epoch, ignore_keys_for_eval):
         if self.control.should_log:
             logs: Dict[str, float] = {}
             tr_loss_scalar = tr_loss.item()
@@ -1423,7 +1434,7 @@ class Trainer:
 
         metrics = None
         if self.control.should_evaluate:
-            metrics = self.evaluate()
+            metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
             self._report_to_hp_search(trial, epoch, metrics)
 
         if self.control.should_save:
@@ -2241,7 +2252,9 @@ class Trainer:
         # Number of samples
         if not isinstance(eval_dataset, IterableDataset):
             num_samples = len(eval_dataset)
-        elif isinstance(eval_dataset, IterableDatasetShard):
+        # The instance check is weird and does not actually check for the type, but whether the dataset has the right
+        # methods. Therefore we need to make sure it also has the attribute.
+        elif isinstance(eval_dataset, IterableDatasetShard) and hasattr(eval_dataset, "num_examples"):
             num_samples = eval_dataset.num_examples
         else:
             num_samples = observed_num_examples
@@ -2502,10 +2515,11 @@ class Trainer:
         Returns:
             The url of the commit of your model in the given repository.
         """
-        if not self.args.should_save:
-            return
 
-        self.create_model_card(model_name=self.args.push_to_hub_model_id, **kwargs)
+        if self.args.should_save:
+            self.create_model_card(model_name=self.args.push_to_hub_model_id, **kwargs)
+        # Needs to be executed on all processes for TPU training, but will only save on the processed determined by
+        # self.args.should_save.
         self.save_model()
 
         # Only push from one node.
